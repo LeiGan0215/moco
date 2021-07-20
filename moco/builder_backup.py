@@ -36,15 +36,10 @@ class MoCo(nn.Module):
             param_k.requires_grad = False  # not update by gradient
 
         # create the queue
-        # 参数不会因为optim.step而更新
         self.register_buffer("queue", torch.randn(dim, K))
         self.queue = nn.functional.normalize(self.queue, dim=0) # [N, K]
-        # 指针，指示
-        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
-        # 为label也生成一个bank
-        self.register_buffer("label_bank", torch.zeros(self.K, dtype=torch.float)) # [K]
-        self.label_bank -= 1 # all init -1
+        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
     @torch.no_grad()
     def _momentum_update_key_encoder(self):
@@ -55,37 +50,20 @@ class MoCo(nn.Module):
             param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
 
     @torch.no_grad()
-    def _dequeue_and_enqueue(self, keys, label):
-        # print(keys.shape) # [32, 128]
+    def _dequeue_and_enqueue(self, keys):
         # gather keys before updating queue
-        keys = concat_all_gather(keys) # [64, 128] [N, C]
-
-        label = concat_all_gather(label)
-        # print(keys.shape)
-        # debug
+        keys = concat_all_gather(keys)
 
         batch_size = keys.shape[0]
 
         ptr = int(self.queue_ptr)
         assert self.K % batch_size == 0  # for simplicity
 
-        # queue = torch.Size([128, 65536])
-        # keys.T = torch.Size([128, 64])
-        # print("queue={}".format(self.queue.shape))
-        # print("keys.T={}".format(keys.T.shape))
-        # debug
-        # [C, K]
         # replace the keys at ptr (dequeue and enqueue)
-        # 队首先进，队首先出
-        # 等价于0-队尾 end-队首的一个队列
-        self.queue[:, ptr:ptr + batch_size] = keys.T # [C, N]
-        # label bank
-        self.label_bank[ptr:ptr + batch_size] = label
+        self.queue[:, ptr:ptr + batch_size] = keys.T
         ptr = (ptr + batch_size) % self.K  # move pointer
-        self.queue_ptr[0] = ptr
 
-        # print(self.label_bank.shape) # [1, 65536]
-        # debug
+        self.queue_ptr[0] = ptr
 
     @torch.no_grad()
     def _batch_shuffle_ddp(self, x):
@@ -134,7 +112,7 @@ class MoCo(nn.Module):
 
         return x_gather[idx_this]
 
-    def forward(self, im_q, im_k, label):
+    def forward(self, im_q, im_k):
         """
         Input:
             im_q: a batch of query images
@@ -170,7 +148,7 @@ class MoCo(nn.Module):
         # negative logits: NxK
         l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
 
-        # logits: [N, 1+K]
+        # logits: Nx(1+K)
         logits = torch.cat([l_pos, l_neg], dim=1)
         # print(logits.shape) # [torch.Size([32, 65537])]
         # debug
@@ -178,73 +156,14 @@ class MoCo(nn.Module):
         # apply temperature
         logits /= self.T
 
-        gt = self.generate_label(label).cuda()
-
         # labels: positive key indicators
-        # labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
+        labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
 
         # dequeue and enqueue
-        self._dequeue_and_enqueue(k, label)
-        # print(label.shape)
-        # print(self.label_bank.shape)
-        # debug
+        self._dequeue_and_enqueue(k)
 
-        # print("logit={}".format(logits.shape))
-        # print("gt={}".format(gt.shape))
+        return logits, labels
 
-        logits = torch.sigmoid(logits)
-
-        # print("===================================")
-        # print("label={}".format(label))
-        # print("gt={}".format(gt))
-        # print("===================================")
-
-        return logits, gt
-
-    def generate_label(self, label, neg_idx=23):
-        """
-        核心
-        根据label关系产生一对多的label
-        """
-        N = label.shape[0]
-        # gt = torch.zeros(N, self.K, dtype=torch.long)
-
-        label_cur = torch.unsqueeze(label, dim=1) # [N, 1]
-        label_cur = label_cur.repeat(1, self.K) # [N ,K]
-
-        lable_all = torch.unsqueeze(self.label_bank, dim=0) # [1, K]
-        label_all = lable_all.repeat(N, 1) # [N, k]
-
-        # print(label_cur.device) # cuda:0
-        # print(label_all.device) # cuda:0
-        # debug
-        a = torch.tensor(1).cuda()
-        b = torch.tensor(0).cuda()
-        gt = torch.where(label_cur==label_all, a, b) # [N, K]
-
-        # mask neg label
-        mask = torch.ones(N, self.K).cuda()
-        coord = torch.where(label_cur == neg_idx)
-        # print(coord[0].shape[0])
-        # if coord[0].shape[0]!=2097152:
-        #     debug
-        mask[coord] = 0
-        gt = gt * mask
-
-        pos = torch.ones(N, 1, dtype=torch.float).cuda()
-        gt = torch.cat([pos, gt], dim=1)
-
-        # print("=====================================================")
-        # num1 = torch.sum(gt==a)
-        # num2 = torch.sum(gt==b)
-        # print("num1={}".format(num1))
-        # print("num2={}".format(num2))
-        # if num1>40:
-        #     debug
-        # # debug
-        # print("=====================================================")
-
-        return gt
 
 # utils
 @torch.no_grad()

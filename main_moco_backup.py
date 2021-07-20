@@ -25,8 +25,6 @@ import torchvision.models as models
 import moco.loader
 import moco.builder
 
-from utils import *
-
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
@@ -86,8 +84,6 @@ parser.add_argument('--moco-dim', default=128, type=int,
                     help='feature dimension (default: 128)')
 parser.add_argument('--moco-k', default=65536, type=int,
                     help='queue size; number of negative keys (default: 65536)')
-# parser.add_argument('--moco-k', default=4, type=int,
-#                     help='queue size; number of negative keys (default: 65536)')
 parser.add_argument('--moco-m', default=0.999, type=float,
                     help='moco momentum of updating key encoder (default: 0.999)')
 parser.add_argument('--moco-t', default=0.07, type=float,
@@ -194,8 +190,8 @@ def main_worker(gpu, ngpus_per_node, args):
         raise NotImplementedError("Only DistributedDataParallel is supported.")
 
     # define loss function (criterion) and optimizer
-    # criterion = nn.CrossEntropyLoss().cuda(args.gpu)
-    criterion = nn.BCELoss().cuda(args.gpu)
+    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+    # criterion = nn.BCELoss().cuda(args.gpu)
 
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
@@ -253,20 +249,12 @@ def main_worker(gpu, ngpus_per_node, args):
         traindir,
         moco.loader.TwoCropsTransform(transforms.Compose(augmentation)))
 
-    # {'360': 0, '5173': 1, '58': 2, 'ABC': 3, 'CCB': 4, 'CMB': 5, 'DH': 6, 'JD': 7, 'None': 8, 'PICC': 9, 'SF': 10,
-    #  'SuNing': 11, 'Taobao': 12, 'VIP': 13, 'ali': 14, 'damai': 15, 'fake': 16, 'fenmingle': 17, 'jiaoyimao': 18,
-    #  'kaola': 19, 'kefu': 20, 'mayi': 21, 'meituan': 22, 'neg': 23, 'pingan': 24, 'police1': 25, 'police2': 26,
-    #  'rong': 27, 'tencent': 28, 'umoney': 29, 'webank': 30, 'weibo': 31, 'weidai': 32, 'weishop': 33, 'xiaomi': 34,
-    #  'yizhifu': 35, 'you': 36, 'yuantong': 37, 'zfb': 38, 'zhuanzhuan': 39}
+    # {'0923base': 0, 'big': 1, 'police_base': 2, 'small': 3}
     # print(train_dataset.class_to_idx)
     # debug
 
-    # if args.distributed:
-    #     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-    # else:
-    #     train_sampler = None
     if args.distributed:
-        train_sampler = DistributedWeightedSampler(train_dataset)
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
         train_sampler = None
 
@@ -289,18 +277,18 @@ def main_worker(gpu, ngpus_per_node, args):
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'optimizer' : optimizer.state_dict(),
-            }, is_best=False, filename='/data2/ganlei/code/moco/save_res/semi_similarity/uniform/mask_neg/1/checkpoint_{:04d}.pth.tar'.format(epoch))
+            }, is_best=False, filename='checkpoint_{:04d}.pth.tar'.format(epoch))
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
-    # top1 = AverageMeter('Acc@1', ':6.2f')
-    # top5 = AverageMeter('Acc@5', ':6.2f')
+    top1 = AverageMeter('Acc@1', ':6.2f')
+    top5 = AverageMeter('Acc@5', ':6.2f')
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, losses,],
+        [batch_time, data_time, losses, top1, top5],
         prefix="Epoch: [{}]".format(epoch))
 
     # switch to train mode
@@ -331,10 +319,10 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
         # acc1/acc5 are (K+1)-way contrast classifier accuracy
         # measure accuracy and record loss
-        # acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        acc1, acc5 = accuracy(output, target, topk=(1, 5))
         losses.update(loss.item(), images[0].size(0))
-        # top1.update(acc1[0], images[0].size(0))
-        # top5.update(acc5[0], images[0].size(0))
+        top1.update(acc1[0], images[0].size(0))
+        top5.update(acc5[0], images[0].size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -423,6 +411,7 @@ def accuracy(output, target, topk=(1,)):
             correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
+
 
 if __name__ == '__main__':
     main()
